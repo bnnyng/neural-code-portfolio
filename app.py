@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 import json
 import matplotlib.pyplot as plt
-import concurrent.futures
 
 from mpl_toolkits.mplot3d import Axes3D
 
