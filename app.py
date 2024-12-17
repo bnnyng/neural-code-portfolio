@@ -333,7 +333,7 @@ def content_ps(update_params : bool = False):
     st.markdown(intro)
     display_single_metric("ps")
 
-# content_sd(st.session_state.analysis_params_update)
+content_sd(st.session_state.analysis_params_update)
 # content_ps(st.session_state.analysis_params_update)
 # content_ccgp()
 
