@@ -812,58 +812,7 @@ def plot_neu_state_space(
 
     ax.set_title(title, y=0.92)
 
-    # fig.tight_layout()
-    
-    
-    
     return fig
-
-
-
-# # Example stimuli (for labeling purposes)
-# stimuli = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
-
-# # Create the 3D plot
-# fig = plt.figure(figsize=(10, 8))
-# ax = fig.add_subplot(111, projection='3d')
-
-# # Plot the conditions as points
-# ax.scatter(condition_state_3d[:, 0], condition_state_3d[:, 1], condition_state_3d[:, 2], color='blue', label='Conditions')
-
-# # Add labels for stimuli (conditions)
-# for i, stim in enumerate(stimuli):
-#     ax.text(condition_state_3d[i, 0], condition_state_3d[i, 1], condition_state_3d[i, 2], stim, fontsize=12)
-
-# # Connect lines between stimuli across contexts (example: A and B across context)
-# # Example: connecting conditions 'C' and 'D' (solid line)
-# ax.plot([condition_state_3d[2, 0], condition_state_3d[3, 0]], 
-#         [condition_state_3d[2, 1], condition_state_3d[3, 1]], 
-#         [condition_state_3d[2, 2], condition_state_3d[3, 2]], 'k-', lw=2)
-
-# # Example: dashed line between conditions (contexts)
-# ax.plot([condition_state_3d[4, 0], condition_state_3d[5, 0]], 
-#         [condition_state_3d[4, 1], condition_state_3d[5, 1]], 
-#         [condition_state_3d[4, 2], condition_state_3d[5, 2]], 'k--', lw=2)
-
-# # Adding error bars (just an example with random values)
-# ax.errorbar(condition_state_3d[:, 0], condition_state_3d[:, 1], condition_state_3d[:, 2], 
-#             xerr=0.05, yerr=0.05, zerr=0.05, fmt='none', color='black')
-
-# # Show the plot
-# ax.set_title('3D MDS Plot of Condition-Averaged Responses')
-# ax.set_xlabel('MDS 1')
-# ax.set_ylabel('MDS 2')
-# ax.set_zlabel('MDS 3')
-# ax.legend()
-
-# plt.show()
-
-# # Compute PRS values (example)
-# _, p_value = ranksums(neural_responses[:, 0], neural_responses[:, 1])
-# print(f"PRS p-value between condition 1 and condition 2: {p_value}")
-
-
-
     
 
 # ----- Plot geometric analyses -----
