@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import itertools
+import concurrent.futures
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -31,7 +32,8 @@ K_TRIALS = 15
 def get_block_num(context : list[int]) -> np.array:
     """
     Define blocks of trials where contexts are alternated by finding where the
-    difference between adjacent context values is non-zero.
+    difference between adjacent context values is non-zero. Corresponds to the
+    `get_block_nr.m` method from the original paper.
 
     Parameters
     ----------
@@ -52,7 +54,8 @@ def get_block_num(context : list[int]) -> np.array:
 
 def get_instance_num(stim : np.array, block : np.array) -> np.array:
     """
-    Get the instance number for the image in each trial block.
+    Get the instance number for the image in each trial block. Corresponds to
+    the `get_instance_nr.m` method fromthe original paper. 
 
     Parameters
     ----------
@@ -86,7 +89,8 @@ def get_session_accuracy(
     """
     Method for computing session-level accuracy on inference trials (trials in 
     which given stimulus is encountered for the first time after a context 
-    switch).
+    switch). Corresponds to the `get_prop_correct_first_instance.m` method from 
+    the original paper.
 
     Parameters
     ----------
@@ -159,6 +163,8 @@ def test_inference_trials(
     task_data : pd.DataFrame
 ) -> dict:
     """
+    A helper function to classify each of 36 sessions (pooled across patients) Corresponds to an internal method in the `split_sessions.m` file from the original paper.
+
     Parameters
     ----------
     beh_data : pd.DataFrame
@@ -278,6 +284,9 @@ def define_dichotomies() -> tuple[dict, np.array, np.array]:
     specified by its response-outcome pair (left or right, high or low reward, 
     respectively).
 
+    Corresponds to the `define_sets` method found in the `sd.m` file of the 
+    original paper.
+
     Returns
     -------
     dict
@@ -295,6 +304,7 @@ def define_dichotomies() -> tuple[dict, np.array, np.array]:
         11 : "AB vs CD",
         20 : "response",
         23 : "AC vs BD", 
+        28 : "parity",
         31 : "AD vs BC"
     }
     pos_set = np.array([
@@ -323,7 +333,7 @@ def make_variable_groups(
 ) -> pd.DataFrame:
     """
     Create groups of all possible combinations of values for the given 
-    variables.
+    variables. Corresponds to the `make_groups.m` method of the original paper.
 
     Parameters
     ----------
@@ -362,7 +372,8 @@ def construct_regressors(
 ) -> pd.DataFrame:
     """
     Method for balancing neuron counts between inference absent (ia) and 
-    inference present (ip) groups.
+    inference present (ip) groups. Corresponds to the `construct_regressors.m`
+    method in the original paper.
     
     Parameters
     ----------
@@ -441,8 +452,6 @@ def prep_regressors(
     g1 : list[int],
     g2 : list[int]
 ):
-    """
-    """
     train1 = np.vstack([
         np.vstack(training.iloc[i, g1])
         for i in range(len(training))
@@ -469,6 +478,42 @@ def prep_regressors(
 
     train, test = np.vstack([train1, train2]), np.vstack([test1, test2])
     return train, train_labels, test, test_labels
+
+def process_dichotomy_sd(g1, g2, n_iter, group_avgs, n_samples, n_folds, show_progress=False):
+    """
+    Helper function to process a single dichotomy pair.
+    """
+    perf = np.zeros(n_iter)
+    boot = np.zeros(n_iter)
+    # Resample to prevent trial-level bias
+    for i in range(n_iter):
+        training, testing = sample_from_data(
+            group_avgs,
+            n_train=n_samples,
+            n_test=0
+        )
+        train, train_labels, _, _ = prep_regressors(
+            training, testing, g1, g2
+        )
+        
+        # Normalize data and remove empty values
+        scaler = StandardScaler()
+        train_scaled = scaler.fit_transform(train)
+        train_scaled = train_scaled[:, ~np.isnan(train_scaled).any(axis=0)]
+
+        # Fit linear SVM
+        decoder = LogisticRegression(max_iter=1000, solver="liblinear")
+        y_hat = cross_val_predict(decoder, train_scaled, train_labels, cv=n_folds)
+        perf[i] = accuracy_score(train_labels, y_hat)
+
+        # Compute null distribution
+        shuffled_labels = shuffle(train_labels)
+        y_hat_null = cross_val_predict(decoder, train_scaled, shuffled_labels, cv=n_folds)
+        boot[i] = accuracy_score(shuffled_labels, y_hat_null)
+
+        if show_progress:
+            print(f"SD complete for dichotomy: {g1}, {g2}")
+    return perf, boot
 
 def sd(
     group_avgs,
@@ -509,40 +554,20 @@ def sd(
     n_pairs = pos_set.shape[0]
     n_folds = 5
 
-    # Matrices for storing performance metrics
-    perf = np.full((n_pairs, n_iter), np.nan)
-    boot = np.full((n_pairs, n_iter), np.nan)
+    all_perf = np.full((n_pairs, n_iter), np.nan)
+    all_boot = np.full((n_pairs, n_iter), np.nan)
 
-    # Iterate through all dichotomies
-    for i, (g1, g2) in enumerate(zip(pos_set, neg_set)):
-        # Resample to prevent trial-level bias
-        for j in range(n_iter):
-            training, testing = sample_from_data(
-                group_avgs,
-                n_train=n_samples,
-                n_test=0
-            )
-            train, train_labels, _, _ = prep_regressors(
-                training, testing, g1, g2
-            )
-            
-            # Normalize data and remove empty values
-            scaler = StandardScaler()
-            train_scaled = scaler.fit_transform(train)
-            train_scaled = train_scaled[:, ~np.isnan(train_scaled).any(axis=0)]
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [
+            executor.submit(process_dichotomy_sd, g1, g2, n_iter, group_avgs, n_samples, n_folds, show_progress=show_progress)
+            for i, (g1, g2) in enumerate(zip(pos_set, neg_set))
+        ]
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            perf, boot = future.result()
+            all_perf[i, :] = perf
+            all_boot[i, :] = boot
 
-            # Fit linear SVM
-            decoder = LogisticRegression(max_iter=1000, solver="liblinear")
-            y_hat = cross_val_predict(decoder, train_scaled, train_labels, cv=n_folds)
-            perf[i, j] = accuracy_score(train_labels, y_hat)
-
-            # Compute null distribution
-            shuffled_labels = shuffle(train_labels)
-            y_hat_null = cross_val_predict(decoder, train_scaled, shuffled_labels, cv=n_folds)
-            boot[i, j] = accuracy_score(shuffled_labels, y_hat_null)
-        if show_progress:
-            print(f"Finished dichotomy {i}: {g1}, {g2}")
-    return perf.flatten(), boot.flatten()
+    return all_perf.flatten(), all_boot.flatten()
 
 # ================
 #       CCGP
@@ -558,6 +583,67 @@ def swap_pairs(column):
         if i+1 < len(column):  # Make sure we have a pair to swap
             column.iloc[i], column.iloc[i+1] = column.iloc[perm_idx[i]], column.iloc[perm_idx[i+1]]
     return column
+
+def construct_holdouts(group, n_cond):
+    """
+    Helper function to construct all possible two-condition holdouts. The
+    last element of each four-element group is the condition to be removed.
+    """
+    combos = list(itertools.combinations(group, n_cond))
+    return np.array([
+        list(c) + list(set(group) - set(c))
+        for c in combos
+    ])
+
+def process_dichotomy_ccgp(g1, g2, for_boot, group_avgs, n_iter, n_samples, n_cond, show_progress=False):
+    """
+    Wrapper to process a dictomony pairing.
+    """
+    # Construct 16 possible train/test splits
+    c1 = construct_holdouts(g1, n_cond)
+    c2 = construct_holdouts(g2, n_cond)
+    holdout_combinations = list(itertools.product(c1, c2))
+    dichot_perm = np.zeros(n_iter)
+
+    # Construct null distribution
+    if for_boot:
+        group_avgs = group_avgs.apply(swap_pairs)
+
+    for i in range(n_iter):
+        perf_temp = []
+        for (c_pos, c_neg) in holdout_combinations:
+            # Select 6 total conditions for training and 2 for testing
+            train_idx = np.concatenate((c_pos[:n_cond], c_neg[:n_cond]))
+            test_idx = np.concatenate((c_pos[n_cond:], c_neg[n_cond:]))
+
+            # Sample trials for each condition
+            sampled_avgs, _ = sample_from_data(
+                group_avgs,
+                n_train=n_samples,
+                n_test=0
+            )
+            train, train_labels, test, test_labels = prep_regressors(
+                sampled_avgs, sampled_avgs, g1=train_idx, g2=test_idx
+            )
+
+            # Normalize (z-score) and remove nan features
+            scaler = StandardScaler()
+            train_scaled = scaler.fit_transform(train)
+            test_scaled = scaler.fit_transform(test)
+            idx_remove_train = np.where(np.isnan(train_scaled).sum(axis=0) > 0)[0]
+            idx_remove_test = np.where(np.isnan(test_scaled).sum(axis=0) > 0)[0]
+            idx_remove = np.union1d(idx_remove_train, idx_remove_test)
+            train_scaled = np.delete(train_scaled, idx_remove, axis=1)
+            test_scaled = np.delete(test_scaled, idx_remove, axis=1)
+
+            # Train decoder (SVM)
+            decoder = LogisticRegression().fit(train_scaled, train_labels)
+            y_hat = decoder.predict(test_scaled)
+            perf_temp.append(np.mean(y_hat == test_labels))
+        dichot_perm[i] = np.mean(perf_temp)
+        if show_progress:
+            print(f"CCGP complete for dichotomy: {g1}, {g2}")
+    return dichot_perm
 
 def ccgp(
     group_avgs,
@@ -589,74 +675,50 @@ def ccgp(
     np.array
         CCGP for every dichotomy (35 in standard geometric analysis with 3
         binary variables). Array has shape (35, n_iter).
-    """
-    def construct_holdouts(group, n_cond):
-        """
-        Helper function to construct all possible two-condition holdouts. The
-        last element of each four-element group is the condition to be removed.
-        """
-        combos = list(itertools.combinations(group, n_cond))
-        return np.array([
-            list(c) + list(set(group) - set(c))
-            for c in combos
-        ])
-
+    """        
     _, pos_set, neg_set = define_dichotomies()
     n_pairs = pos_set.shape[0]
     n_cond = 3
-    dichot_perm = np.full((n_pairs, n_iter), np.nan)
+    all_dichot_perm = np.full((n_pairs, n_iter), np.nan)
 
-    for i, (g1, g2) in enumerate(zip(pos_set, neg_set)):
-        start_time = time.time()
-        # Construct 16 possible train/test splits
-        c1 = construct_holdouts(g1, n_cond)
-        c2 = construct_holdouts(g2, n_cond)
-        holdout_combinations = list(itertools.product(c1, c2))
-
-        # Construct null distribution
-        if for_boot:
-            group_avgs = group_avgs.apply(swap_pairs)
-
-        for j in range(n_iter):
-            perf_temp = []
-            for (c_pos, c_neg) in holdout_combinations:
-                # Select 6 total conditions for training and 2 for testing
-                train_idx = np.concatenate((c_pos[:n_cond], c_neg[:n_cond]))
-                test_idx = np.concatenate((c_pos[n_cond:], c_neg[n_cond:]))
-
-                # Sample trials for each condition
-                sampled_avgs, _ = sample_from_data(
-                    group_avgs,
-                    n_train=n_samples,
-                    n_test=0
-                )
-                train, train_labels, test, test_labels = prep_regressors(
-                    sampled_avgs, sampled_avgs, g1=train_idx, g2=test_idx
-                )
-
-                # Normalize (z-score) and remove nan features
-                scaler = StandardScaler()
-                train_scaled = scaler.fit_transform(train)
-                test_scaled = scaler.fit_transform(test)
-                idx_remove_train = np.where(np.isnan(train_scaled).sum(axis=0) > 0)[0]
-                idx_remove_test = np.where(np.isnan(test_scaled).sum(axis=0) > 0)[0]
-                idx_remove = np.union1d(idx_remove_train, idx_remove_test)
-                train_scaled = np.delete(train_scaled, idx_remove, axis=1)
-                test_scaled = np.delete(test_scaled, idx_remove, axis=1)
-
-                # Train decoder (SVM)
-                decoder = LogisticRegression().fit(train_scaled, train_labels)
-                y_hat = decoder.predict(test_scaled)
-                perf_temp.append(np.mean(y_hat == test_labels))
-            dichot_perm[i, j] = np.mean(perf_temp)
-        end_time = time.time()
-        if show_progress:
-            print(f"CCGP computed for pair {i+1} of {n_pairs}. Time: {end_time - start_time:.6f} seconds.")
-    return dichot_perm
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = []
+        for i, (g1, g2) in enumerate(zip(pos_set, neg_set)):
+            futures.append(executor.submit(process_dichotomy_ccgp, g1, g2, for_boot, group_avgs, n_iter, n_samples, n_cond, show_progress=show_progress))
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            dichot_perm = future.result()
+            all_dichot_perm[i, :] = dichot_perm
+    return all_dichot_perm
 
 # =============================
 #       PARALLELISM SCORE
 # =============================
+
+def process_dichotomy_ps(g1, g2, n_iter, group_avgs, for_boot, show_progress=False):
+    """
+    Wrapper to process a dichotomy pairing.
+    """
+    dist = np.zeros(n_iter)
+    g2 = list(itertools.permutations(g2))
+    for j in range(n_iter):
+        # Geometric null construction
+        if for_boot:
+            group_avgs = group_avgs.apply(swap_pairs)
+        
+        # Recompute mean after every geometric null rotation
+        mu = group_avgs.map(np.mean)
+        mu = mu.values
+        
+        # Compute parallelism over all possible pairings of dichotomy vectors
+        cosine_pairs = []
+        for perm in g2:
+            u = mu[:, g1]
+            v = mu[:, perm]
+            cosine_pairs.append(cosine_similarity(u, v))
+        dist[j] = np.max(cosine_pairs)
+    if show_progress:
+        print(f"PS complete for dichotomy: {g1}, {g2}")
+    return dist
 
 def ps(
     group_avgs : pd.DataFrame,
@@ -668,30 +730,16 @@ def ps(
     Method for performing parallelism score analysis for a group of cells.
     """
     _, pos_set, neg_set = define_dichotomies()
-    dist = [[None for _ in range(n_iter)] for _ in range(len(pos_set))]
-
-    # Iterate through all dichotomies
-    for i, (g1, g2) in enumerate(zip(pos_set, neg_set)):
-        g2 = list(itertools.permutations(g2))
-        for j in range(n_iter):
-            # Geometric null construction
-            if for_boot:
-                group_avgs = group_avgs.apply(swap_pairs)
-            
-            # Recompute mean after every geometric null rotation
-            mu = group_avgs.map(np.mean)
-            mu = mu.values
-            
-            # Compute parallelism over all possible pairings of dichotomy vectors
-            cosine_pairs = []
-            for perm in g2:
-                u = mu[:, g1]
-                v = mu[:, perm]
-                cosine_pairs.append(cosine_similarity(u, v))
-            dist[i][j] = np.max(cosine_pairs)
-        if show_progress:
-            print(f"PS computed for dichotomy {i} of {len(pos_set)}.")
-    return np.array(dist)
+    all_dist = []
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [
+            executor.submit(process_dichotomy_ps, g1, g2, n_iter, group_avgs, for_boot, show_progress=show_progress)
+            for i, (g1, g2) in enumerate(zip(pos_set, neg_set))
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            dist = future.result()
+            all_dist.append(dist)
+    return all_dist
 
 # ====================
 #       PLOTTING      
