@@ -4,6 +4,8 @@ import pandas as pd
 import json
 import matplotlib.pyplot as plt
 
+import concurrent.futures
+
 import helper_functions as F
 
 # =============================
@@ -52,7 +54,8 @@ with st.sidebar:
         # st.markdown(sidebar_text)
         caption = """
             Source code for the Python implementation used in this project is available 
-            at the following repository: [bnnyng/neural-code-portfolio](https://github.com/bnnyng/neural-code-portfolio). 
+            at the following repository, as well as a notebook explaining
+            data pre-processing methods: [bnnyng/neural-code-portfolio](https://github.com/bnnyng/neural-code-portfolio). 
             
             Original MatLab code from the paper is available at: [osf.io/qpt8f/](https://osf.io/qpt8f/)
         """
@@ -195,7 +198,7 @@ st.divider()
 st.subheader("Explore data")
 
 @st.fragment
-def content_data():
+def content_data_cellular():
     cell_level = """
     ##### Trial-level firing rates for each neuron
 
@@ -214,33 +217,80 @@ def content_data():
         cell_idx
     )
     st.dataframe(sample_cell_data)
-    
 
-content_data()
+@st.fragment
+def content_data_population():
+    population_level = """
+    ##### Constructing a pseudo-population
+    
+    Neuron recordings from all patients were combined to form a single "pseudo-population."
+    The final neurons used in analysis are then sampled randomly from **balanced
+    dichotomies**, or the 35 possible ways that eight task conditions could be 
+    split into pairs of four conditions each.
+    """
+    st.markdown(population_level)
+    n_idx = st.number_input(
+        label="Enter the number of neurons to sample from:",
+        min_value=1,
+        max_value=2439,
+        value=100
+    )
+    sample_thr = st.number_input(
+        label="Set minimum number of samples:",
+        min_value=1,
+        max_value=None,
+        value=15
+    )
+    population_data = """
+    Each row of the dataset corresponds to a single neuron, and each column is
+    a specific combination of task conditions. Each cell is an array of firing rates.
+    Only correct trials are considered in this part of the analysis. 
+    """
+    st.markdown(population_data)
+    regressors = F.construct_regressors(
+        st.session_state.neu_data,
+        sample_thr=sample_thr,
+        select=[i for i in range(n_idx)]
+    )
+    st.dataframe(regressors)
+
+content_data_cellular()
+content_data_population()
 
 # ----- Visualize Neuron State Space -----
 
 st.divider()
 st.subheader("Visualize neuron state space")
 
-@st.cache_data
+@st.fragment
 def content_state_space():
     intro = """
-    
+    Using a dimensionality reduction method called **multi-dimensional scaling**,
+    the neural activity space for each brain region can be visualized as a three-dimensional structure.
+    In the study, the **geometry of a representation** is defined by the arrangement
+    of eight points that represent population responses under different task conditions.
     """
     st.markdown(intro)
+
+    plot_area = st.selectbox(
+        label="Select a brain region to view:",
+        options=['HPC','vmPFC','AMY','dACC','preSMA','VTC'],
+        index=0
+    )
 
     fig_pres = F.plot_neu_state_space(
         st.session_state.neu_data,
         st.session_state.beh_data,
         st.session_state.task_data,
-        inf="present"
+        inf="present",
+        area_name=plot_area
     )
     fig_abs = F.plot_neu_state_space(
         st.session_state.neu_data,
         st.session_state.beh_data,
         st.session_state.task_data,
-        inf="absent"
+        inf="absent",
+        area_name=plot_area
     )
 
     col1, col2 = st.columns(2)
@@ -249,7 +299,7 @@ def content_state_space():
     with col2:
         st.pyplot(fig_pres)
     caption = """
-    Hippocampal population response during stimulus period in inference present 
+    Brain area population response during stimulus period in inference present 
     and absent sessions. Pairwise disimilarities between different task conditions
     are visualized in a lower-dimensional space using multidimensional scaling (MDS). Points correspond to stimulus-context combinations (i.e., the 8 task conditions).
     Lines connect the same stimuli across contexts. These figures replicate 2(j) and 3(i) from the original paper.
@@ -322,13 +372,21 @@ def content_ps(update_params : bool = False):
     intro = """ 
     ##### Parallelism score 
 
-    **Parallelism score** is...
+    The **parallelism score** measures how coding directions for one variable are 
+    related to the others using **cosine similarity,** or cosine of the angle between
+    two vectors. Cosine similarity values can range from -1, which indicates vectors
+    pointing in opposite directions, to 1, which indicates vectors with the same 
+    direction. Unlike SD and CCGP, PS does not measure the decodability of a representation.
     """
     st.markdown(intro)
     display_single_metric("ps")
 
-content_sd(st.session_state.analysis_params_update)
-# content_ps(st.session_state.analysis_params_update)
-# content_ccgp()
+with concurrent.futures.ThreadPoolExecutor() as executor:
+    futures = [
+        executor.submit(content_sd(st.session_state.analysis_params_update)),
+        executor.submit(content_ccgp(st.session_state.analysis_params_update)),
+        executor.submit(content_ps(st.session_state.analysis_params_update))
+    ]
+
 
 

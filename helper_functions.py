@@ -546,9 +546,9 @@ def sd(
     Returns
     -------
     np.array
-        TO DO
+        Shattering dimensionality for the current set of regressors.
     np.array
-
+        Bootstrapped values for a null distribution.
     """
     _, pos_set, neg_set = define_dichotomies()
     n_pairs = pos_set.shape[0]
@@ -948,12 +948,40 @@ def plot_swarm(
 #      GEOMETRIC ANALYSES      
 # =============================
 
+def process_area(i, area_name, area_idx, idx_sets, metric, neu_data, n_resample, n_perm_inner, n_iter_boot, n_samples, show_progress=False):
+    start_time = time.time()
+    data_ = [[], []]
+    data_boot = [[], []]
+    for j, idx_set in enumerate(idx_sets):
+        if show_progress:
+            curr_set = "inf_abs" if j == 0 else "inf_pres"
+            print(f"Running analyses for {curr_set} trials over {n_samples[i]} samples...")
+        curr_idx = np.intersect1d(area_idx, idx_set)
+        for k in range(n_resample):
+            group_avgs = construct_regressors(neu_data, n_samples[i], curr_idx)
+            if metric == "sd":
+                t_1, t_2 = sd(group_avgs, n_iter_boot, n_samples[i], show_progress=show_progress)
+            elif metric == "ccgp":
+                t_1 = ccgp(group_avgs, n_perm_inner, n_samples[i], show_progress=show_progress)
+                t_2 = ccgp(group_avgs, n_iter_boot, n_samples[i], for_boot=True, show_progress=show_progress)
+            elif metric == "ps":
+                t_1 = ps(group_avgs, n_perm_inner, show_progress=show_progress)
+                t_2 = ps(group_avgs, n_iter_boot, for_boot=True, show_progress=show_progress)
+            data_[j].append(t_1)
+            data_boot[j].append(t_2)
+            np.save(f"/results/{area_name}_{metric}_{curr_set}_sample_{k}.npy")
+    end_time = time.time()
+    if show_progress:
+        print(f"Analyses complete for area {area_name}. Time: {end_time - start_time:.6f} seconds.")
+    return data_, data_boot
+
+
 def run_geometric_analysis(
     metric : str,
     neu_data : pd.DataFrame,
     beh_data : pd.DataFrame,
     task_data : pd.DataFrame,
-    n_resample : int = 5,
+    n_resample : int = 5, # Set to 1000 for paper
     n_perm_inner : int = 1,
     n_iter_boot : int = 1000,
     n_samples : list[int] = [15, 15, 15, 15, 15, 10],
@@ -973,35 +1001,16 @@ def run_geometric_analysis(
     # Step 3: Run geometric analyses
     # Initialize containers to restore results for both conditions
     # 
-    data_ = [
-        [[] for _ in range(len(cell_area_groups))],
-        [[] for _ in range(len(cell_area_groups))]
-    ]
-    data_boot = [
-        [[] for _ in range(len(cell_area_groups))],
-        [[] for _ in range(len(cell_area_groups))]
-    ]
+    all_data_ = []
+    all_data_boot = []
 
-    for i, (area_name, area_idx) in enumerate(cell_area_groups.items()):
-        start_time = time.time()
-        for j, idx_set in enumerate(idx_sets):
-            if show_progress:
-                curr_set = "inference absent" if j == 0 else "inference present"
-                print(f"Running analyses for {curr_set} trials over {n_samples[i]} samples...")
-            curr_idx = np.intersect1d(area_idx, idx_set)
-            for _ in range(n_resample):
-                group_avgs = construct_regressors(neu_data, n_samples[i], curr_idx)
-                if metric == "sd":
-                    t_1, t_2 = sd(group_avgs, n_iter_boot, n_samples[i], show_progress=show_progress)
-                elif metric == "ccgp":
-                    t_1 = ccgp(group_avgs, n_perm_inner, n_samples[i], show_progress=show_progress)
-                    t_2 = ccgp(group_avgs, n_iter_boot, n_samples[i], for_boot=True, show_progress=show_progress)
-                elif metric == "ps":
-                    t_1 = ps(group_avgs, n_perm_inner, show_progress=show_progress)
-                    t_2 = ps(group_avgs, n_iter_boot, for_boot=True, show_progress=show_progress)
-                data_[j][i].append(t_1)
-                data_[j][i].append(t_2)
-        end_time = time.time()
-        if show_progress:
-            print(f"Analyses complete for area {area_name}. Time: {end_time - start_time:.6f} seconds.")
-    return data_, data_boot
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [
+            executor.submit(process_area, i, area_name, area_idx, idx_sets, metric, neu_data, n_resample, n_perm_inner, n_iter_boot, n_samples, show_progress=show_progress)
+            for i, (area_name, area_idx) in enumerate(cell_area_groups.items())
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            data_, data_boot = future.result()
+            all_data_.append(data_)
+            all_data_boot.append(data_boot)
+    return all_data_, all_data_boot
