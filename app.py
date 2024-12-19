@@ -167,10 +167,12 @@ def content_introduction():
     
     The app consists of the following sections:
     * **Explore data:** a walkthrough of orignal data and processing methods used
-    for geometric analyses. DataFrames are embedded for 
+    for geometric analyses. DataFrames are embedded for direct interation. 
     * **Visualize neuron state space:** a lower-dimensional visualization of neural
-    responses in the hippocampus.
-    * Geometric analysis of balanced dichotomies: 
+    responses in different brain areas.
+    * **Geometric analysis of balanced dichotomies:** attempts to run and plot the three 
+    types of the measurements from the original paper (shattering dimensionality, 
+    cross-condition generalization performance, and parallelism score). 
 
     The purpose of this app is to unpack the computational analysis being
     performed in a cutting-edge neuroscience paper to be accessible to undergraduates
