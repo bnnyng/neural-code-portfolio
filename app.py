@@ -383,12 +383,21 @@ def content_ps(update_params : bool = False):
     st.markdown(intro)
     display_single_metric("ps")
 
-with concurrent.futures.ThreadPoolExecutor() as executor:
-    futures = [
-        executor.submit(content_sd(st.session_state.analysis_params_update)),
-        executor.submit(content_ccgp(st.session_state.analysis_params_update)),
-        executor.submit(content_ps(st.session_state.analysis_params_update))
-    ]
+@st.fragment
+def select_geometric_analyses():
+    analyses = st.multiselect(
+        label="Select metric to run:",
+        options=["Shattering dimensionality (SD)", "Cross-condition generalization performance (CCGP)", "Parallelism score (PS)"]
+    )
 
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        if "Shattering dimensionality (SD)" in analyses:
+            futures.append(executor.submit(content_sd(st.session_state.analysis_params_update)))
+        if "Cross-condition generalization performance (CCGP)" in analyses:
+            futures.append(executor.submit(content_ccgp(st.session_state.analysis_params_update)))
+        if "Parallelism score (PS)" in analyses:
+            futures.append(executor.submit(content_ps(st.session_state.analysis_params_update)))
 
+select_geometric_analyses()
 
