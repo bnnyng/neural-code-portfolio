@@ -969,7 +969,7 @@ def process_area(i, area_name, area_idx, idx_sets, metric, neu_data, n_resample,
                 t_2 = ps(group_avgs, n_iter_boot, for_boot=True, show_progress=show_progress)
             data_[j].append(t_1)
             data_boot[j].append(t_2)
-            np.save(f"/results/{area_name}_{metric}_{curr_set}_sample_{k}.npy")
+            #np.save(f"/results/{area_name}_{metric}_{curr_set}_sample_{k}.npy")
     end_time = time.time()
     if show_progress:
         print(f"Analyses complete for area {area_name}. Time: {end_time - start_time:.6f} seconds.")
