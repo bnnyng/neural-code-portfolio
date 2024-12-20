@@ -256,7 +256,7 @@ def content_data_cellular():
         min_value=0, max_value=MAX_IDX, value=0
     )
     sample_cell_data = F.get_cell_array(
-        st.session_state.neu_data,
+        st.session_state.params["neu_data"],
         cell_idx
     )
     st.dataframe(sample_cell_data)
