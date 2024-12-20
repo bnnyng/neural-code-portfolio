@@ -1,9 +1,10 @@
-from joblib import Parallel, delayed
+import os
 import time
 import numpy as np
 import pandas as pd
 import itertools
 import concurrent.futures
+from multiprocessing import Pool
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -22,6 +23,31 @@ from sklearn.metrics import pairwise_distances
 
 SEED = 42
 K_TRIALS = 15
+N_FOLDS = 5
+
+SAVE_FOLDER_PATH = "sample-results/"
+N_PROCESSES = 4
+
+# =============================
+#       UTILITY FUNCTIONS 
+# =============================
+
+def save_metric_array(array, params, boot=False, file_name=None):
+    if not file_name:
+        area_name = params["area_name"]
+        metric = params["metric"]
+        inf_type = params["inf_type"]
+        curr_resample = params["curr_resample"]
+
+        file_name = f"{area_name}_{metric}_{inf_type}"
+        if "dichot" in params:
+            file_name += f"_dichot_{params["dichot"]}"
+        file_name += f"_sample_{curr_resample}"
+        file_name += f"_boot.npy" if boot else ".npy"
+    file_path = os.path.join(SAVE_FOLDER_PATH, file_name)
+    np.save(file_path, array)
+    if params["show_progress"]:
+        print(f"Array saved to {file_name}.")
 
 # ===========================
 #       DATA PROCESSING     
@@ -365,11 +391,7 @@ def make_variable_groups(
         groups[group_names[i]] = condition
     return groups
 
-def construct_regressors(
-    neu_data : pd.DataFrame,
-    sample_thr : int,
-    select : list
-) -> pd.DataFrame:
+def construct_regressors(params : dict) -> pd.DataFrame:
     """
     Method for balancing neuron counts between inference absent (ia) and 
     inference present (ip) groups. Corresponds to the `construct_regressors.m`
@@ -382,7 +404,7 @@ def construct_regressors(
         neuron.
     sample_thr : int
         Minimum number of correct trials of each type to retain neurons.
-    select : list
+    curr_idx : list
         Neuron indices to include.
 
     Returns
@@ -392,25 +414,29 @@ def construct_regressors(
         corresponds to a neuron, and each column corresponds to the average 
         firing rate for a combination of task variables.
     """
+    # Unpack parameters
+    neu_data = params["neu_data"]
+    n_samples = params["n_samples"]
+    curr_idx = params["curr_idx"]
+    
     group_avgs = pd.DataFrame()
-    for i in select:
+
+    for idx in curr_idx:
         # Select only correct trials for given neuron
-        cell_data = get_cell_array(neu_data=neu_data, cell_idx=i)
-        valid_data = cell_data[cell_data["iscorrect"] == True]
-        
+        cell_data = get_cell_array(neu_data=neu_data, cell_idx=idx)
+        valid_data = cell_data[cell_data["iscorrect"] == True]     
         # Make trial-level labels according to binary task variables
         groups = make_variable_groups(
             cell_data=valid_data,
             var_names=["context", "reward", "response"]
         )     
-
         firing_rate = valid_data["fr_stim"].values
         group_avg = []
         for combo in groups.columns:
             # Get boolean mask for inclusion in current group
             group_firing_rate = firing_rate[groups[combo]]
             # Check that neuron has enough samples of the current type
-            if len(group_firing_rate) > sample_thr:
+            if len(group_firing_rate) > n_samples:
                 group_avg.append(group_firing_rate)
             if combo not in group_avgs.columns:
                 group_avgs[combo] = None
@@ -479,14 +505,18 @@ def prep_regressors(
     train, test = np.vstack([train1, train2]), np.vstack([test1, test2])
     return train, train_labels, test, test_labels
 
-def process_dichotomy_sd(g1, g2, n_iter, group_avgs, n_samples, n_folds, show_progress=False):
+def process_dichotomy_sd(i, g1, g2, group_avgs, params): 
     """
     Helper function to process a single dichotomy pair.
     """
-    perf = np.zeros(n_iter)
-    boot = np.zeros(n_iter)
+    n_samples = params["n_samples"]
+    n_iter_boot = params["n_iter_boot"]
+
+    perf = np.zeros(n_iter_boot)
+    boot = np.zeros(n_iter_boot)
+
     # Resample to prevent trial-level bias
-    for i in range(n_iter):
+    for j in range(n_iter_boot):
         training, testing = sample_from_data(
             group_avgs,
             n_train=n_samples,
@@ -503,25 +533,22 @@ def process_dichotomy_sd(g1, g2, n_iter, group_avgs, n_samples, n_folds, show_pr
 
         # Fit linear SVM
         decoder = LogisticRegression(max_iter=1000, solver="liblinear")
-        y_hat = cross_val_predict(decoder, train_scaled, train_labels, cv=n_folds)
-        perf[i] = accuracy_score(train_labels, y_hat)
+        y_hat = cross_val_predict(decoder, train_scaled, train_labels, cv=N_FOLDS)
+        perf[j] = accuracy_score(train_labels, y_hat)
 
         # Compute null distribution
         shuffled_labels = shuffle(train_labels)
-        y_hat_null = cross_val_predict(decoder, train_scaled, shuffled_labels, cv=n_folds)
-        boot[i] = accuracy_score(shuffled_labels, y_hat_null)
-
-        if show_progress:
-            print(f"SD complete for dichotomy: {g1}, {g2}")
+        y_hat_null = cross_val_predict(decoder, train_scaled, shuffled_labels, cv=N_FOLDS)
+        boot[j] = accuracy_score(shuffled_labels, y_hat_null)
+    if params["show_progress"]:
+        print(f"SD complete for dichotomy: {g1}, {g2}")
+    if params["save_data"]:
+        params["dichot"] = i
+        save_metric_array(perf, params)
+        save_metric_array(boot, params, boot=True)
     return perf, boot
 
-def sd(
-    group_avgs,
-    n_iter : int,
-    n_samples : int,
-    n_folds : int = 5,
-    show_progress : bool = False
-):
+def sd(group_avgs, params):
     """
     Method for performing shattering dimensionality analysis for a group of 
     cells. Shattering dimensionality is defined as the average decoding accuracy
@@ -534,14 +561,10 @@ def sd(
         variables. Each row represents a single neuron, and columns correspond 
         to different groupings of task variables. The DataFrame is generated by
         the `construct_regressors` method.
-    n_iter : int
+    n_iter_boot : int
         Number of iterations of bootstrap re-sampling to perform.
     n_samples : int
         Number of trials of each condition to sample.
-    n_folds : int
-        Number of folds to use in cross-validation.
-    show_progress : bool
-        Whether to print the training progress.
 
     Returns
     -------
@@ -550,23 +573,30 @@ def sd(
     np.array
         Bootstrapped values for a null distribution.
     """
+    # Unpack parameters
+    n_iter_boot = params["n_iter_boot"]
     _, pos_set, neg_set = define_dichotomies()
     n_pairs = pos_set.shape[0]
-    n_folds = 5
 
-    all_perf = np.full((n_pairs, n_iter), np.nan)
-    all_boot = np.full((n_pairs, n_iter), np.nan)
+    all_perf = np.full((n_pairs, n_iter_boot), np.nan)
+    all_boot = np.full((n_pairs, n_iter_boot), np.nan)
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = [
-            executor.submit(process_dichotomy_sd, g1, g2, n_iter, group_avgs, n_samples, n_folds, show_progress=show_progress)
+            executor.submit(
+                process_dichotomy_sd,
+                i, g1, g2, group_avgs, params
+            )
             for i, (g1, g2) in enumerate(zip(pos_set, neg_set))
         ]
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             perf, boot = future.result()
             all_perf[i, :] = perf
             all_boot[i, :] = boot
-
+    if params["save_data"]:
+        params["dichot"] = "all"
+        save_metric_array(all_perf, params)
+        save_metric_array(all_boot, params, boot=True)
     return all_perf.flatten(), all_boot.flatten()
 
 # ================
@@ -595,10 +625,14 @@ def construct_holdouts(group, n_cond):
         for c in combos
     ])
 
-def process_dichotomy_ccgp(g1, g2, for_boot, group_avgs, n_iter, n_samples, n_cond, show_progress=False):
+def process_dichotomy_ccgp(i, g1, g2, group_avgs, params, for_boot=False, n_cond=3):# g1, g2, params, n_cond=3, for_boot=False):
     """
     Wrapper to process a dictomony pairing.
     """
+    # Unpack parameters
+    n_iter = params["n_iter_boot"] if for_boot else params["n_perm_inner"]
+    n_samples = params["n_samples"]
+
     # Construct 16 possible train/test splits
     c1 = construct_holdouts(g1, n_cond)
     c2 = construct_holdouts(g2, n_cond)
@@ -609,7 +643,7 @@ def process_dichotomy_ccgp(g1, g2, for_boot, group_avgs, n_iter, n_samples, n_co
     if for_boot:
         group_avgs = group_avgs.apply(swap_pairs)
 
-    for i in range(n_iter):
+    for j in range(n_iter):
         perf_temp = []
         for (c_pos, c_neg) in holdout_combinations:
             # Select 6 total conditions for training and 2 for testing
@@ -640,18 +674,15 @@ def process_dichotomy_ccgp(g1, g2, for_boot, group_avgs, n_iter, n_samples, n_co
             decoder = LogisticRegression().fit(train_scaled, train_labels)
             y_hat = decoder.predict(test_scaled)
             perf_temp.append(np.mean(y_hat == test_labels))
-        dichot_perm[i] = np.mean(perf_temp)
-        if show_progress:
-            print(f"CCGP complete for dichotomy: {g1}, {g2}")
+        dichot_perm[j] = np.mean(perf_temp)
+    if params["show_progress"]:
+        print(f"CCGP complete for dichotomy: {g1}, {g2}")
+    if params["save_data"]:
+        params["dichot"] = i
+        save_metric_array(dichot_perm, params, boot=for_boot)
     return dichot_perm
 
-def ccgp(
-    group_avgs,
-    n_iter : int = 5,
-    n_samples : int = 15,
-    for_boot : bool = False,
-    show_progress : bool = False
-):
+def ccgp(group_avgs, params, for_boot=False):
     """
     Method for performing CCGP analysis for a group fo cells.
 
@@ -662,7 +693,7 @@ def ccgp(
         variables. Each row represents a single neuron, and columns correspond 
         to different groupings of task variables. The DataFrame is generated by
         the `construct_regressors` method.
-    n_iter : int
+    n_iter_boot : int
         Number of iterations of bootstrap re-sampling to perform.
     n_samples : int
         Number of trials of each condition to sample.
@@ -674,30 +705,37 @@ def ccgp(
     -------
     np.array
         CCGP for every dichotomy (35 in standard geometric analysis with 3
-        binary variables). Array has shape (35, n_iter).
+        binary variables). Array has shape (35, n_iter_boot).
     """        
     _, pos_set, neg_set = define_dichotomies()
     n_pairs = pos_set.shape[0]
-    n_cond = 3
-    all_dichot_perm = np.full((n_pairs, n_iter), np.nan)
+    all_dichot_perm = np.full((n_pairs, params["n_iter_boot"]), np.nan)
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = []
         for i, (g1, g2) in enumerate(zip(pos_set, neg_set)):
-            futures.append(executor.submit(process_dichotomy_ccgp, g1, g2, for_boot, group_avgs, n_iter, n_samples, n_cond, show_progress=show_progress))
+            futures.append(executor.submit(
+                process_dichotomy_ccgp,
+                i, g1, g2, group_avgs,
+                params, for_boot=for_boot
+            ))
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             dichot_perm = future.result()
             all_dichot_perm[i, :] = dichot_perm
+    if params["save_data"]:
+        params["dichot"] = "all"
+        save_metric_array(all_dichot_perm, params, boot=for_boot)
     return all_dichot_perm
 
 # =============================
 #       PARALLELISM SCORE
 # =============================
 
-def process_dichotomy_ps(g1, g2, n_iter, group_avgs, for_boot, show_progress=False):
+def process_dichotomy_ps(i, g1, g2, group_avgs, params, for_boot=False):# g1, g2, n_iter_boot, group_avgs, for_boot, show_progress=False):
     """
     Wrapper to process a dichotomy pairing.
     """
+    n_iter = params["n_iter_boot"] if for_boot else params["n_perm_inner"]
     dist = np.zeros(n_iter)
     g2 = list(itertools.permutations(g2))
     for j in range(n_iter):
@@ -716,16 +754,14 @@ def process_dichotomy_ps(g1, g2, n_iter, group_avgs, for_boot, show_progress=Fal
             v = mu[:, perm]
             cosine_pairs.append(cosine_similarity(u, v))
         dist[j] = np.max(cosine_pairs)
-    if show_progress:
+    if params["show_progress"]:
         print(f"PS complete for dichotomy: {g1}, {g2}")
+    if params["save_data"]:
+        params["dichot"] = i
+        save_metric_array(dist, params, boot=for_boot)
     return dist
 
-def ps(
-    group_avgs : pd.DataFrame,
-    n_iter : int = 1,
-    for_boot : bool = False,
-    show_progress : bool = False
-):
+def ps(group_avgs, params, for_boot=False):
     """
     Method for performing parallelism score analysis for a group of cells.
     """
@@ -733,12 +769,19 @@ def ps(
     all_dist = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = [
-            executor.submit(process_dichotomy_ps, g1, g2, n_iter, group_avgs, for_boot, show_progress=show_progress)
+            executor.submit(
+                process_dichotomy_ps,
+                i, g1, g2, group_avgs, 
+                params, for_boot=for_boot
+            )
             for i, (g1, g2) in enumerate(zip(pos_set, neg_set))
         ]
         for future in concurrent.futures.as_completed(futures):
             dist = future.result()
             all_dist.append(dist)
+    if params["save_data"]:
+        params["dichot"] = "all"
+        save_metric_array(all_dist, params, boot=for_boot)
     return all_dist
 
 # ====================
@@ -751,13 +794,13 @@ def plot_task_difficulties():
 
 # ----- Plot neural state space -----
 
-def plot_neu_state_space(
-    neu_data : pd.DataFrame,
-    beh_data : pd.DataFrame,
-    task_data : pd.DataFrame,
-    inf : str = "present",
-    area_name : str = "HPC"
-):
+def plot_neu_state_space(params):
+#     neu_data : pd.DataFrame,
+#     beh_data : pd.DataFrame,
+#     task_data : pd.DataFrame,
+#     inf : str = "present",
+#     area_name : str = "HPC"
+# ):
     """
     Low-dimensional visualizations of neural state space for a single brain 
     region.
@@ -785,9 +828,23 @@ def plot_neu_state_space(
         print(x, y, z)
         return x, y, z
 
+    # Default values
+    if "n_samples" not in params:
+        params["n_samples"] = 15
+    if "area_name" not in params:
+        params["area_name"] = "HPC"
+    if "inf_type" not in params:
+        params["inf_type"] = "inf_pres"
+    
+    # Unpack parameters
+    neu_data = params["neu_data"]
+    beh_data = params["beh_data"]
+    task_data = params["task_data"]
+    area_name = params["area_name"]
+
     # Get indices of inference type
     sess = split_sessions(neu_data, beh_data, task_data)
-    if inf == "present":
+    if params["inf_type"] == "inf_pres":
         inf_idx = sess["present_idx"] 
         title = "Inference Present"
     else:
@@ -796,7 +853,7 @@ def plot_neu_state_space(
 
     # Get average firing rate for each neuron under a given condition
     area_groups = define_cell_area_groups(neu_data)
-    curr_idx = np.intersect1d(area_groups[area_name], inf_idx)
+    params["curr_idx"] = np.intersect1d(area_groups[area_name], inf_idx)
     # avg_data = {}
     # for idx in curr_idx:
     #     cell_data = get_cell_array(neu_data, idx)
@@ -813,7 +870,7 @@ def plot_neu_state_space(
     #             )
     # avg_matrix = pd.DataFrame(avg_data).values
 
-    group_avgs = construct_regressors(neu_data, 15, curr_idx)
+    group_avgs = construct_regressors(params)
     group_means = group_avgs.map(np.mean)
     group_means = group_means.values
 
@@ -948,31 +1005,51 @@ def plot_swarm(
 #      GEOMETRIC ANALYSES      
 # =============================
 
-def process_area(i, area_name, area_idx, idx_sets, metric, neu_data, n_resample, n_perm_inner, n_iter_boot, n_samples, show_progress=False):
+def process_area(params):
+    """
+    Helper method to run each brain area in parallel.
+    """    
+    # Unpack parameters
+    metric = params["metric"]
+    area_name = params["area_name"]
+    n_samples = params["n_samples"]
+    neu_data = params["neu_data"]
+    idx_sets = params["idx_sets"]
+    n_resample = params["n_resample"]
+    n_perm_inner = params["n_perm_inner"]
+    n_iter_boot = params["n_iter_boot"]
+    show_progress = params["show_progress"]
+
     start_time = time.time()
     data_ = [[], []]
     data_boot = [[], []]
+
+    # Run for both inference absent and inference present
     for j, idx_set in enumerate(idx_sets):
-        if show_progress:
-            curr_set = "inf_abs" if j == 0 else "inf_pres"
-            print(f"Running analyses for {curr_set} trials over {n_samples[i]} samples...")
-        curr_idx = np.intersect1d(area_idx, idx_set)
+        params["inf_type"] = "inf_abs" if j == 0 else "inf_pres"
+        params["curr_idx"] = np.intersect1d(params["area_idx"], idx_set)
         for k in range(n_resample):
-            group_avgs = construct_regressors(neu_data, n_samples[i], curr_idx)
+            params["curr_resample"] = k
+            group_avgs = construct_regressors(params)
             if metric == "sd":
-                t_1, t_2 = sd(group_avgs, n_iter_boot, n_samples[i], show_progress=show_progress)
+                t_1, t_2 = sd(group_avgs, params)
             elif metric == "ccgp":
-                t_1 = ccgp(group_avgs, n_perm_inner, n_samples[i], show_progress=show_progress)
-                t_2 = ccgp(group_avgs, n_iter_boot, n_samples[i], for_boot=True, show_progress=show_progress)
+                t_1 = ccgp(group_avgs, params)
+                t_2 = ccgp(group_avgs, params, for_boot=True)
             elif metric == "ps":
-                t_1 = ps(group_avgs, n_perm_inner, show_progress=show_progress)
-                t_2 = ps(group_avgs, n_iter_boot, for_boot=True, show_progress=show_progress)
+                t_1 = ps(group_avgs, params)
+                t_2 = ps(group_avgs, params, for_boot=True)
             data_[j].append(t_1)
             data_boot[j].append(t_2)
-            #np.save(f"/results/{area_name}_{metric}_{curr_set}_sample_{k}.npy")
+        save_metric_array(np.array(data_, dtype=object), params, file_name=f"{area_name}_{metric}_{params["inf_type"]}_TEST.npy")
+        save_metric_array(np.array(data_boot, dtype=object), params, file_name=f"{area_name}_{metric}_{params["inf_type"]}_boot_TEST.npy")
+        print(f"{metric.upper()} complete for area {area_name} and all {params["inf_type"]} trials.")
     end_time = time.time()
     if show_progress:
-        print(f"Analyses complete for area {area_name}. Time: {end_time - start_time:.6f} seconds.")
+        print(f"{metric.upper()} complete for area {area_name}. Time: {end_time - start_time:.6f} seconds.")
+    if params["save_data"]:
+        save_metric_array(np.array(data_, dtype=object), params, file_name=f"{area_name}_{metric}_allTrials_TEST.npy")
+        save_metric_array(np.array(data_boot, dtype=object), params, file_name=f"{area_name}_{metric}_allTrials_boot_TEST.npy")
     return data_, data_boot
 
 
@@ -982,35 +1059,48 @@ def run_geometric_analysis(
     beh_data : pd.DataFrame,
     task_data : pd.DataFrame,
     n_resample : int = 5, # Set to 1000 for paper
-    n_perm_inner : int = 1,
-    n_iter_boot : int = 1000,
-    n_samples : list[int] = [15, 15, 15, 15, 15, 10],
-    show_progress : bool = False
+    n_perm_inner : int = 1, # Number of times to sample neurons inside of computation methods
+    n_iter_boot : int = 1000, # Number of times to perform bootstrap sampling
+    n_samples : list[int] = [15, 15, 15, 15, 15, 10], # Minimum of each condition per brain area
+    show_progress : bool = False,
+    save_data : bool = False
 ):
     # Step 1: Compute session-level inference performance
     sess = split_sessions(neu_data, beh_data, task_data)
-    inf_absent, inf_present = sess["absent"], sess["present"]
     absent_idx, present_idx = sess["absent_idx"], sess["present_idx"]
     idx_sets = [absent_idx, present_idx]
-    session_names = sess["sessions"]
-    all_sessions = neu_data["sessionID"].to_list()
 
     # Step 2: Aggregate neurons by area
     cell_area_groups = define_cell_area_groups(neu_data)
+    n_samples 
 
     # Step 3: Run geometric analyses
-    # Initialize containers to restore results for both conditions
-    # 
     all_data_ = []
     all_data_boot = []
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures = [
-            executor.submit(process_area, i, area_name, area_idx, idx_sets, metric, neu_data, n_resample, n_perm_inner, n_iter_boot, n_samples, show_progress=show_progress)
-            for i, (area_name, area_idx) in enumerate(cell_area_groups.items())
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            data_, data_boot = future.result()
-            all_data_.append(data_)
-            all_data_boot.append(data_boot)
+    for i, (area_name, area_idx) in enumerate(cell_area_groups.items()):
+        data_, data_boot = process_area({
+            "metric" : metric,
+            "area_name" : area_name,
+            "area_idx" : area_idx,
+            "n_samples" : n_samples[i],
+            "neu_data" : neu_data,
+            "idx_sets" : idx_sets,
+            "n_resample" : n_resample,
+            "n_perm_inner" : n_perm_inner,
+            "n_iter_boot" : n_iter_boot,
+            "show_progress" : show_progress,
+            "save_data" : save_data
+        })
+        all_data_.append(data_)
+        all_data_boot.append(data_boot)
+    save_metric_array(
+        np.array(all_data_, dtype=object),
+         {"show_progress" : show_progress}, 
+         file_name=f"{metric}_allAreas.npy"
+    )
+    save_metric_array(
+        np.array(all_data_boot, dtype=object), 
+        {"show_progress" : show_progress}, 
+        file_name=f"{metric}_allAreas_boot.npy"
+    )
     return all_data_, all_data_boot
